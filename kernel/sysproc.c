@@ -12,7 +12,7 @@ sys_exit(void)
   int n;
   argint(0, &n);
   exit(n);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -43,7 +43,7 @@ sys_sbrk(void)
 
   argint(0, &n);
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (growproc(n) < 0)
     return -1;
   return addr;
 }
@@ -55,12 +55,14 @@ sys_sleep(void)
   uint ticks0;
 
   argint(0, &n);
-  if(n < 0)
+  if (n < 0)
     n = 0;
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
+  while (ticks - ticks0 < n)
+  {
+    if (killed(myproc()))
+    {
       release(&tickslock);
       return -1;
     }
@@ -91,3 +93,53 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// uint64
+// sys_calculate(void)
+// {
+//   int x = 0, y = 0;
+//   char op = 0;
+//   int *result = 0;
+//   int calc_result = 0;
+
+//   // if (argint(0, &x) < 0 ||
+//   //     argint(1, &y) < 0 ||
+//   //     argaddr(3, (uint64 *)&result) < 0)
+//   // {
+//   //   return -1;
+//   // }
+
+//   // char *op_addr;
+//   // if (argaddr(2, (uint64 *)&op_addr) < 0 ||
+//   //     copyin(myproc()->pagetable, &op, op_addr, sizeof(char)) < 0)
+//   // {
+//   //   return -1;
+//   // }
+
+//   switch (op)
+//   {
+//   case '+':
+//     calc_result = x + y;
+//     break;
+//   case '-':
+//     calc_result = x - y;
+//     break;
+//   case '*':
+//     calc_result = x * y;
+//     break;
+//   case '/':
+//     if (y == 0)
+//       return -1;
+//     calc_result = x / y;
+//     break;
+//   default:
+//     return -1;
+//   }
+
+//   if (copyout(myproc()->pagetable, (uint64)result, (char *)&calc_result, sizeof(int)) < 0)
+//   {
+//     return -1;
+//   }
+
+//   return 0;
+// }
