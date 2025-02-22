@@ -6,53 +6,57 @@
 #include "kernel/proc.h"
 #include "kernel/syscall.h"
 #include "kernel/defs.h"
-#include "kernel/fs.h"
-#include "kernel/sleeplock.h"
 #include "kernel/file.h"
-#define PIPESIZE 512
-typedef struct task_t
-{
-  int priority;
-  int x;
-  int y;
-  char op;     // Supports "+", "-", "*", "/"
-  int *result; // Stores the computation result
-  int *error;  // Returns error if the input is invalid
-} task_t;
+
+#include "priority_queue.h"
 
 struct pipe_rt
 {
   struct spinlock lock;
-  task_t tasks[PIPESIZE];
-  uint64 nread;     // number of tasks read
-  uint64 nwrite;    // number of tasks written
-  uint64 readopen;  // read fd is still open
-  uint64 writeopen; // write fd is still open
+  priority_queue_t pq; // Priority queue for tasks
+  int nwrite;          // Number of writes
+  int nread;           // Number of reads
+  int task_id_counter; // Counter for generating unique task IDs
+  int readopen;        // read fd is still open
+  int writeopen;       // write fd is still open
 };
 
-int pipe_rt_alloc(struct file **f0, struct file **f1)
+int pipealloc_rt(struct file **f0, struct file **f1)
 {
   struct pipe_rt *pi;
 
   pi = 0;
   *f0 = *f1 = 0;
+
+  /* Allocate file descriptor */
   if ((*f0 = filealloc()) == 0 || (*f1 = filealloc()) == 0)
     goto bad;
+
+  /* Allocate pipe_rt structure from kalloc */
   if ((pi = (struct pipe_rt *)kalloc()) == 0)
     goto bad;
+
+  /* Initialize the pipe_rt structure */
+  initlock(&pi->lock, "pipe_rt");
+
+  /* Initialize priority queue */
+  pq_init(&pi->pq);
+
+  pi->task_id_counter = 0;
   pi->readopen = 1;
   pi->writeopen = 1;
-  pi->nwrite = 0;
-  pi->nread = 0;
-  initlock(&pi->lock, "pipe_rt");
-  (*f0)->type = FD_PIPE;
+
+  /* Set up the file descriptors: read end and write end */
+  (*f0)->type = FD_PIPERT;
   (*f0)->readable = 1;
   (*f0)->writable = 0;
-  (*f0)->pipe_rt = pi;
-  (*f1)->type = FD_PIPE;
+  (*f0)->pipe = (struct pipe *)pi;
+
+  (*f1)->type = FD_PIPERT;
   (*f1)->readable = 0;
   (*f1)->writable = 1;
-  (*f1)->pipe_rt = pi;
+  (*f1)->pipe = (struct pipe *)pi;
+
   return 0;
 
 bad:
@@ -65,19 +69,20 @@ bad:
   return -1;
 }
 
-void pipe_rt_close(struct pipe_rt *pi, int writable)
+void pipeclose_rt(struct pipe_rt *pi, int writable)
 {
   acquire(&pi->lock);
   if (writable)
   {
     pi->writeopen = 0;
-    wakeup(&pi->nread);
+    wakeup((void *)&pi->nread); // Wake up readers since no more writes coming
   }
   else
   {
     pi->readopen = 0;
-    wakeup(&pi->nwrite);
   }
+
+  /* If both ends are closed */
   if (pi->readopen == 0 && pi->writeopen == 0)
   {
     release(&pi->lock);
@@ -87,126 +92,74 @@ void pipe_rt_close(struct pipe_rt *pi, int writable)
     release(&pi->lock);
 }
 
-int pipe_rt_write(struct pipe_rt *pi, uint64 addr, int n)
+int pipewrite_rt(struct pipe_rt *pi, uint64 addr, int n)
 {
-  struct proc *pr = myproc();
-  task_t new_task;
+  struct task_rt task;
 
-  if (n != sizeof(task_t))
+  /* Check if write size matches task_rt size */
+  if (n != sizeof(struct task_rt))
+    return -1;
+
+  /* Copy task from user space */
+  if (copyin(myproc()->pagetable, (char *)&task, addr, sizeof(task_rt)) < 0)
     return -1;
 
   acquire(&pi->lock);
 
-  // Copy task from user space
-  if (copyin(pr->pagetable, (char *)&new_task, addr, sizeof(task_t)) == -1)
+  /* Insert task into priority queue */
+  if (pq_insert(&pi->pq, &task) < 0)
   {
     release(&pi->lock);
     return -1;
   }
 
-  // Find correct position based on priority
-  int insert_pos = pi->nwrite;
-  for (int i = pi->nread; i < pi->nwrite; i++)
-  {
-    if (pi->tasks[i % PIPESIZE].priority < new_task.priority)
-    {
-      insert_pos = i;
-      break;
-    }
-  }
-
-  // Shift tasks to make room for new task
-  if (insert_pos < pi->nwrite)
-  {
-    for (int i = pi->nwrite; i > insert_pos; i--)
-    {
-      pi->tasks[i % PIPESIZE] = pi->tasks[(i - 1) % PIPESIZE];
-    }
-  }
-
-  // Insert new task
-  pi->tasks[insert_pos % PIPESIZE] = new_task;
   pi->nwrite++;
 
-  wakeup(&pi->nread);
+  /* Wake up any sleeping readers */
+  wakeup((void *)&pi->nread);
+
   release(&pi->lock);
-  return sizeof(task_t);
+  return sizeof(struct task_rt);
 }
 
-int pipe_rt_read(struct pipe_rt *pi, uint64 addr, int n)
+int piperead_rt(struct pipe_rt *pi, uint64 addr, int n)
 {
+  struct task_rt task;
   struct proc *pr = myproc();
 
+  /* Check if read size matches task_rt size */
+  if (n != sizeof(struct task_rt))
+    return -1;
+
   acquire(&pi->lock);
-  while (pi->nread == pi->nwrite && pi->writeopen)
+
+  /* Wait until there's data to read */
+  while (pi->nwrite == pi->nread && pi->writeopen)
   {
     if (killed(pr))
     {
       release(&pi->lock);
       return -1;
     }
-    sleep(&pi->nread, &pi->lock);
+    sleep((void *)&pi->nread, &pi->lock);
   }
 
-  if (pi->nread < pi->nwrite)
+  /* Try to pop highest priority task */
+  if (pq_pop(&pi->pq, &task) < 0)
   {
-    if (copyout(pr->pagetable, addr, (char *)&pi->tasks[pi->nread % PIPESIZE], sizeof(task_t)) == -1)
-    {
-      release(&pi->lock);
-      return -1;
-    }
-    pi->nread++;
-    wakeup(&pi->nwrite);
     release(&pi->lock);
-    return sizeof(task_t);
+    return -1;
+  }
+
+  pi->nread++;
+
+  /* Copy task to user space */
+  if (copyout(myproc()->pagetable, addr, (char *)&task, sizeof(task_rt)) < 0)
+  {
+    release(&pi->lock);
+    return -1;
   }
 
   release(&pi->lock);
-  return 0;
-}
-static int
-fdalloc(struct file *f)
-{
-  int fd;
-  struct proc *p = myproc();
-
-  for (fd = 0; fd < NOFILE; fd++)
-  {
-    if (p->ofile[fd] == 0)
-    {
-      p->ofile[fd] = f;
-      return fd;
-    }
-  }
-  return -1;
-}
-uint64 sys_pipe_rt(void)
-{
-  uint64 fdarray;
-  struct file *rf, *wf;
-  int fd0, fd1;
-  struct proc *p = myproc();
-  argaddr(0, &fdarray);
-
-  if (pipe_rt_alloc(&rf, &wf) < 0)
-    return -1;
-  fd0 = -1;
-  if ((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0)
-  {
-    if (fd0 >= 0)
-      p->ofile[fd0] = 0;
-    fileclose(rf);
-    fileclose(wf);
-    return -1;
-  }
-  if (copyout(p->pagetable, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
-      copyout(p->pagetable, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0)
-  {
-    p->ofile[fd0] = 0;
-    p->ofile[fd1] = 0;
-    fileclose(rf);
-    fileclose(wf);
-    return -1;
-  }
-  return 0;
+  return sizeof(struct task_rt);
 }

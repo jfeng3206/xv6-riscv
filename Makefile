@@ -1,7 +1,7 @@
 K=kernel
 U=user
 include proj1/user/Makefile
-include proj1/kernel/Makefile
+include proj2/user/Makefile
 
 
 OBJS = \
@@ -32,7 +32,8 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o \
-	proj1/$K/calculate.o
+	proj1/$K/calculate.o\
+	# proj2/$K/pipe_rt.o
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
 #TOOLPREFIX = 
@@ -144,7 +145,8 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
-	$U/_calc-test
+	$U/_calc-test\
+	$U/_pipe_test\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
